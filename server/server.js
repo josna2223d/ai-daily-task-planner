@@ -1,127 +1,93 @@
-import express from "express";
-import cors from "cors";
-import sqlite3 from "sqlite3";
-import dotenv from "dotenv";
-import { v4 as uuidv4 } from "uuid";
-import OpenAI from "openai";
-
-dotenv.config();
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const { Pool } = require("pg");
+const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 3000;
-
-/* ---------------- DATABASE ---------------- */
-
-const db = new sqlite3.Database("./database.sqlite", (err) => {
-  if (err) console.error(err.message);
-  console.log("Connected to the SQLite database.");
+/* SUPABASE DATABASE CONNECTION */
+const pool = new Pool({
+  connectionString:
+    "postgresql://postgres:@db.auzssmkzgjiewktspwxw.supabase.co:5432/postgres,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-/* ---------------- OPENAI ---------------- */
+/* CREATE TABLE IF NOT EXISTS */
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      completed BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log("Connected to Supabase PostgreSQL ✅");
+}
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "demo-key",
-});
+initDB();
 
-/* ---------------- AUTH (TEMP MOCK) ---------------- */
-
-const requireAuth = (req, res, next) => {
-  req.userId = req.headers.authorization || "default-user-id";
-  next();
-};
-
-/* ---------------- ROUTES ---------------- */
-
-/* Health check */
+/* ROOT TEST ROUTE */
 app.get("/", (req, res) => {
-  res.send("Backend is running 🚀");
+  res.send("AI Daily Planner API Running 🚀");
 });
 
-/* Get tasks */
-app.get("/tasks", requireAuth, (req, res) => {
-  db.all(
-    "SELECT * FROM tasks WHERE user_id = ?",
-    [req.userId],
-    (err, rows) => {
-      if (err) return res.status(500).json(err);
-      res.json(rows);
-    }
-  );
-});
-
-/* Create task */
-app.post("/tasks", requireAuth, (req, res) => {
-  const { title, completed } = req.body;
-
-  const id = uuidv4();
-
-  db.run(
-    "INSERT INTO tasks (id, title, completed, user_id) VALUES (?, ?, ?, ?)",
-    [id, title, completed ? 1 : 0, req.userId],
-    (err) => {
-      if (err) return res.status(500).json(err);
-      res.json({ id, title, completed });
-    }
-  );
-});
-
-/* Toggle task */
-app.put("/tasks/:id", requireAuth, (req, res) => {
-  const { completed } = req.body;
-
-  db.run(
-    "UPDATE tasks SET completed = ? WHERE id = ?",
-    [completed ? 1 : 0, req.params.id],
-    (err) => {
-      if (err) return res.status(500).json(err);
-      res.json({ success: true });
-    }
-  );
-});
-
-/* Delete task */
-app.delete("/tasks/:id", requireAuth, (req, res) => {
-  db.run("DELETE FROM tasks WHERE id = ?", [req.params.id], (err) => {
-    if (err) return res.status(500).json(err);
-    res.json({ success: true });
-  });
-});
-
-/* AI Task Generator */
-app.post("/ai/generate", requireAuth, async (req, res) => {
+/* GET ALL TASKS */
+app.get("/tasks", async (req, res) => {
   try {
-    const { goal } = req.body;
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are a productivity assistant.",
-        },
-        {
-          role: "user",
-          content: `Break this goal into daily tasks: ${goal}`,
-        },
-      ],
-    });
-
-    const tasks = completion.choices[0].message.content;
-    res.json({ tasks });
+    const result = await pool.query(
+      "SELECT * FROM tasks ORDER BY created_at DESC"
+    );
+    res.json(result.rows);
   } catch (err) {
-    console.error(err);
-    res.json({
-      tasks:
-        "1. Plan your goal\n2. Break into small steps\n3. Execute daily",
-    });
+    res.status(500).json(err.message);
   }
 });
 
-/* ---------------- START SERVER ---------------- */
+/* ADD TASK */
+app.post("/tasks", async (req, res) => {
+  try {
+    const { title } = req.body;
+    const id = uuidv4();
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT} 🚀`);
+    await pool.query("INSERT INTO tasks (id, title) VALUES ($1,$2)", [
+      id,
+      title,
+    ]);
+
+    res.json({ id, title, completed: false });
+  } catch (err) {
+    res.status(500).json(err.message);
+  }
 });
+
+/* DELETE TASK */
+app.delete("/tasks/:id", async (req, res) => {
+  try {
+    await pool.query("DELETE FROM tasks WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json(err.message);
+  }
+});
+
+/* TOGGLE COMPLETE */
+app.put("/tasks/:id", async (req, res) => {
+  try {
+    await pool.query(
+      "UPDATE tasks SET completed = NOT completed WHERE id=$1",
+      [req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json(err.message);
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server running 🚀"));
